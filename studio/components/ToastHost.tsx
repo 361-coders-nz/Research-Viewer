@@ -19,6 +19,9 @@ export function ToastHost() {
             animate={{ opacity: 1, y: 0, scale: 1 }}
             exit={{ opacity: 0, y: 8, scale: 0.98 }}
             transition={{ duration: 0.18, ease: [0.2, 0, 0, 1] }}
+            onClick={() => toastStore.dismiss(t.id)}
+            style={{ cursor: "pointer" }}
+            title="Click to dismiss"
           >
             {t.message}
           </motion.div>

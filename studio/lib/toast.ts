@@ -49,3 +49,7 @@ export const toastStore = new ToastStore();
 export function toast(message: string, tone: Toast["tone"] = "info", durationMs?: number) {
   return toastStore.push({ message, tone, durationMs });
 }
+
+export function dismissToast(id: string) {
+  toastStore.dismiss(id);
+}

@@ -49,7 +49,7 @@ import type { DocRecord } from "@/lib/liveblocks";
 import { useStudioUser } from "./RoomProviders";
 import { onCanvasDropResult, useTreeGenerator } from "./useTreeGenerator";
 import { useImport } from "./useImport";
-import { toast } from "@/lib/toast";
+import { toast, dismissToast } from "@/lib/toast";
 
 const nodeTypes: NodeTypes = {
   doc: DocCardNode,
@@ -255,7 +255,12 @@ function CanvasSurface({ canvasId }: { canvasId: string }) {
   const others = useCanvasOthers();
   const { user } = useStudioUser();
   const { generateCanvasDrop } = useTreeGenerator();
+  const { importFiles } = useImport();
   const { screenToFlowPosition, fitView } = useReactFlow();
+
+  // Per-session toast tracking so we can dismiss the "Generating…" toast
+  // when the bridge replies with ready or error.
+  const sessionToasts = useRef<Map<string, string>>(new Map());
 
   const storedNodes = useMemo<StoredCanvasNode[]>(() => {
     if (!nodesStorage) return [];
@@ -468,15 +473,25 @@ function CanvasSurface({ canvasId }: { canvasId: string }) {
   // ---- listen for canvas-drop tree results -------------------------------
 
   useEffect(() => {
-    const off = onCanvasDropResult((_sid, result) => {
+    const off = onCanvasDropResult((sid, result) => {
       if (result.job.canvasId !== canvasId) return;
       if (result.status === "generating") {
-        console.info("[canvas-drop] generating…");
+        console.info("[canvas-drop] generating…", sid);
         return;
       }
+      // Clear the persistent "Generating…" toast now that we have an outcome
+      const toastId = sessionToasts.current.get(sid);
+      if (toastId) {
+        dismissToast(toastId);
+        sessionToasts.current.delete(sid);
+      }
       if (result.status === "error") {
-        console.info("[canvas-drop] error:", result.message);
-        toast(`Tree generation failed — ${result.message.slice(0, 120)}`, "error");
+        console.error("[canvas-drop] error:", result.message);
+        toast(
+          `Tree generation failed — ${result.message.slice(0, 240)}`,
+          "error",
+          15000,
+        );
         return;
       }
       // ready
@@ -544,7 +559,9 @@ function CanvasSurface({ canvasId }: { canvasId: string }) {
     [screenToFlowPosition],
   );
 
-  // Generate a tree from raw markdown at a flow position
+  // Generate a tree from raw markdown at a flow position.
+  // Keeps a persistent "Generating…" toast open (click to dismiss, or auto-
+  // cleared on tree.ready / tree.error) so long Claude calls stay visible.
   const generateTreeFromText = useCallback(
     (title: string, body: string, position: XYPosition) => {
       const trimmed = body.trim();
@@ -563,10 +580,15 @@ function CanvasSurface({ canvasId }: { canvasId: string }) {
         title,
       });
       if (!sid) {
-        toast("Bridge offline — start studio-bridge and retry.", "error");
+        toast("Bridge offline — start studio-bridge and retry.", "error", 15000);
         return;
       }
-      toast(`Generating tree from "${title}"…`, "success");
+      const toastId = toast(
+        `Generating tree from "${title}"… (click to dismiss)`,
+        "info",
+        0, // persistent until cleared on ready/error
+      );
+      sessionToasts.current.set(sid, toastId);
     },
     [canvasId, generateCanvasDrop],
   );
@@ -588,10 +610,17 @@ function CanvasSurface({ canvasId }: { canvasId: string }) {
         return;
       }
 
-      // 2) Drop of a .md file from Finder → generate a tree on canvas
+      // 2) Drop of .md file(s) from Finder → import to workspace (drawer)
+      //    AND kick off a tree generation for the first one on the canvas.
       const files = Array.from(e.dataTransfer.files ?? []);
-      const md = files.find((f) => f.name.toLowerCase().endsWith(".md"));
-      if (md) {
+      const mdFiles = files.filter((f) => f.name.toLowerCase().endsWith(".md"));
+      if (mdFiles.length > 0) {
+        // Import all md files so they show up in the drawer
+        importFiles(mdFiles).catch((err) => {
+          console.error("[canvas-drop] import failed:", err);
+        });
+        // Use the first as the tree-gen source
+        const md = mdFiles[0];
         md
           .text()
           .then((text) => {
@@ -599,7 +628,7 @@ function CanvasSurface({ canvasId }: { canvasId: string }) {
             generateTreeFromText(title, text, pos);
           })
           .catch((err) => {
-            toast(`Couldn't read ${md.name}: ${String(err)}`, "error");
+            toast(`Couldn't read ${md.name}: ${String(err)}`, "error", 10000);
           });
         return;
       }
@@ -610,7 +639,7 @@ function CanvasSurface({ canvasId }: { canvasId: string }) {
         generateTreeFromText("Dropped text", text, pos);
       }
     },
-    [addDocAt, toFlowPos, generateTreeFromText],
+    [addDocAt, toFlowPos, generateTreeFromText, importFiles],
   );
 
   const onDragOver = useCallback((e: React.DragEvent) => {
