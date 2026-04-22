@@ -1,234 +1,118 @@
-# oxFlow Studio — CLAUDE.md
+# Research Viewer (oxFlow Studio) — CLAUDE.md
 
-Authoring contract + architecture notes for this repo. Read this first if you're a fresh AI agent or a new contributor. The file is the single source of truth for **how this app is wired together** and **why**.
+Architecture notes for agents and new contributors. Read this first. This file is the source of truth for **how the app is wired** and **why** — if it contradicts the code, fix the file in the same commit.
 
-> If something here contradicts the code, the code wins — but update this file in the same commit.
+GitHub: `github.com/361-coders-nz/Research-Viewer` · Prod: `oxflow-studio.vercel.app`
 
 ---
 
 ## What this is
 
-`oxflow-studio` is a two-package workspace that gives the oxFlow team an interactive place to explore its markdown research corpus:
+Two-package workspace for the 361° / Oxcon research corpus:
 
-- **`studio/`** — Next.js 16 (App Router + Turbopack) web app. Deployed to Vercel at **https://oxflow-studio.vercel.app**. The canvas is the only working surface; there is no separate tree viewer since v0.4.
-- **`studio-bridge/`** — tiny Node.js WebSocket server the user runs locally. Spawns their own `claude` CLI for chat bubbles and concept-tree generation. Writes session summaries to `~/Desktop/oxflow-studio/sessions/`.
+- **`studio/`** — Next.js 16 (App Router + Turbopack) web app. The canvas is the only surface where trees are rendered.
+- **`studio-bridge/`** — Node WebSocket server the user runs locally. Spawns their own `claude` CLI for chat + tree generation. Session summaries land in `~/Desktop/oxflow-studio/sessions/`.
 
-The deployed app is entirely client-side (SSR + Liveblocks). The only server-side Next.js route is `/api/liveblocks-auth/route.ts`, used as a fallback when a public Liveblocks key isn't set.
+Client-side app only. The one server route is `/api/liveblocks-auth/route.ts` (fallback when a public Liveblocks key isn't set). The LLM plane never touches Vercel — every chat turn and tree generation goes through the user's local bridge at `ws://localhost:4456`.
 
-Primary data plane is **Liveblocks** — two room kinds:
-
-```
-workspace-<id>          — team-level state (imported docs, canvas directory, docTrees)
-canvas-<nanoid>         — per-canvas state (nodes, edges, chat threads, meta)
-```
-
-The LLM plane never touches Vercel. Every chat turn and every tree generation round-trips through the user's **local** `studio-bridge` process at `ws://localhost:4456`, which spawns `claude -p …` using whatever auth the user has on their machine. The browser can connect to `ws://localhost` from HTTPS because localhost is a secure context in Chromium and Firefox.
-
----
-
-## Repo layout (authoritative)
+Collaborative state lives in **Liveblocks**, two room kinds:
 
 ```
-oxflow-studio/
-├── CLAUDE.md                       ← this file
-├── README.md                       ← top-level quick start
-├── studio/                         ← the Next.js app
-│   ├── app/
-│   │   ├── layout.tsx              ← mounts RoomProviders, TopBar, TreeGeneratorHost, GlobalDropZone
-│   │   ├── page.tsx                ← hub with tiles + drop zone + user's docs/canvases
-│   │   ├── globals.css             ← CSS tokens + component styles (no Tailwind)
-│   │   ├── tree/page.tsx           ← TreeExplorer page
-│   │   ├── reader/[...slug]/page.tsx
-│   │   ├── canvas/page.tsx + [id]/page.tsx
-│   │   └── api/liveblocks-auth/route.ts
-│   ├── components/
-│   │   ├── RoomProviders.tsx       ← User context + WorkspaceRoomProvider + ClientSideSuspense
-│   │   ├── TopBar.tsx, GeoBg.tsx, UserMenu.tsx, ToastHost.tsx, GlobalDropZone.tsx
-│   │   ├── Canvas.tsx              ← DocDrawer + React Flow surface + tree popover
-│   │   ├── TreeView.tsx, TreeNode.tsx, TreeExplorer.tsx, TreePopover.tsx
-│   │   ├── MarkdownReader.tsx      ← react-markdown + post-render quote highlighter
-│   │   ├── TreeStatusDot.tsx       ← 4-state dot used everywhere a tree's status is shown
-│   │   ├── useTreeGenerator.ts     ← TreeGeneratorHost + useTreeGenerator + useDocTree hook
-│   │   ├── RegenTreeMenu.tsx       ← dropdown + focus-prompt popover for per-doc regeneration
-│   │   ├── useDocs.ts, useImport.tsx
-│   │   ├── BridgeStatusBadge.tsx
-│   │   └── nodes/
-│   │       ├── DocCardNode.tsx
-│   │       ├── NoteNode.tsx
-│   │       ├── ChatBubbleNode.tsx  ← attach-docs strip + Chat/Tree mode toggle
-│   │       ├── SynthesisTreeNode.tsx  ← renders a generated tree as a canvas node
-│   │       └── NodeChrome.tsx      ← shared NodeDeleteButton
-│   ├── lib/
-│   │   ├── liveblocks.ts           ← client, Presence, storage types, room contexts
-│   │   ├── bridge.ts               ← BridgeClient singleton + wire types
-│   │   ├── parse.ts                ← gray-matter + regex md parser (body → DocRecord)
-│   │   ├── tree.ts                 ← TreeSnapshot builders (workspace/doc/chat/rule) + dagre layout
-│   │   ├── toast.ts                ← tiny pubsub toast store
-│   │   └── user.ts                 ← localStorage-backed StudioUser
-│   ├── .env.local                  ← Liveblocks keys + optional bridge url (gitignored)
-│   ├── vercel.json
-│   └── package.json
-└── studio-bridge/                  ← local-only Node CLI
-    ├── src/
-    │   ├── index.ts                ← ws+http server, spawn handlers
-    │   └── treePrompt.ts           ← locked system prompt for concept trees
-    ├── bin/oxflow-studio-bridge
-    ├── README.md
-    └── package.json
+workspace-<id>          — team-level: imported docs, canvas directory
+canvas-<nanoid>         — per-canvas: nodes, edges, chat threads, meta
 ```
 
 ---
 
-## Architectural decisions (the ones you need to understand before changing anything)
+## Architectural decisions (read before changing anything)
 
 ### 1. Liveblocks for all shared state
+- No server-side storage beyond Liveblocks' cloud. Deploys are stateless.
+- Every mutation goes through `useWorkspaceMutation` / `useCanvasMutation`. These throw if called before storage loads — so every page that issues mutations sits under `<ClientSideSuspense>`.
+- `DocRecord.body` is a single string; Liveblocks' per-field cap is ~128KB. If research md grows past that, split into `bodyChunks: string[]` and reassemble on read.
 
-Every piece of collaborative state lives in a Liveblocks room. The client doesn't have a database of its own. This means:
+### 2. LLM runs on the user's machine, never on Vercel
+- `studio-bridge` is a tiny local ws server the user starts once. It spawns `claude -p …` using their local `claude` binary, reusing whatever auth Claude Code has. No API key lives in the deployed app.
+- Chat + tree generation only work when the bridge is up. The top-bar `BridgeStatusBadge` turns green on connect.
+- stream-json parsing happens in the bridge. The browser only sees high-level events (`chat.delta`, `tree.status`, `tree.ready`, etc.) defined in `studio/lib/bridge.ts`.
 
-- **No server-side storage** beyond Liveblocks' cloud. Deploys are stateless.
-- **Drag-drop import parses client-side** and writes `LiveObject<DocRecord>` entries into the workspace room. No upload API. No S3. No build-time ingest.
-- **All mutations are wrapped in `useWorkspaceMutation` / `useCanvasMutation`**. These throw if called before storage loads — so every page that issues mutations must sit inside a `<ClientSideSuspense>` boundary (the layout already wraps one around children; canvas pages wrap their own).
-- **Doc chunking**: `DocRecord.body` is a single string. Liveblocks' per-field cap is ~128KB. We don't chunk yet because research md files are almost always <50KB. If this changes, split into `bodyChunks: string[]` and reassemble on read.
+### 3. Trees live on the canvas as individual nodes
+There's no separate tree viewer. Every generated tree is expanded into one `CanvasNodeConcept` per concept + `CanvasEdge` entries for parent→child links, all laid out with dagre (`studio/lib/conceptLayout.ts`) from the drop position. Two entry points:
 
-### 2. LLM runs **on the user's machine**, never on Vercel
+- **Canvas drop / paste** — drop an `.md` on the canvas or paste markdown with `⌘V`. Sends a `tree.generate` with `kind: "synthesis"` over a single synthetic source. On `tree.ready`, `Canvas.tsx` flattens the result and mutates in nodes + edges at once. `fitView({ nodes })` auto-frames the new subtree so it can't be missed.
+- **Chat-bubble synthesis** — a chat bubble in Tree mode with attached doc chips triggers the same flow from inside a node (`ChatBubbleNode` uses the shared `flattenTree` + `layoutFlat` helpers).
 
-`studio-bridge` is a tiny local ws server the user starts once. It spawns `claude -p …` using their local `claude` binary, which picks up whatever auth they have configured for Claude Code. No API key lives in the deployed app. This means:
+**Branch querying.** Each non-root concept has a Chat button. Clicking spawns a chat bubble seeded with a `role: "system"` message carrying the branch's label / summary / excerpt. The bubble hides the seed from its visible feed but forwards it as history so Claude stays grounded.
 
-- **Chat bubbles + tree generation only work when the user has the bridge running.** The top-bar BridgeStatusBadge is green when connected, amber/red otherwise.
-- **No cloud bill on the team's Vercel account** for model inference.
-- **Stream-json is parsed in the bridge**, not the browser. The browser only sees high-level events (`chat.delta`, `tree.status`, `tree.ready`, etc.) defined in `studio/lib/bridge.ts`. This keeps the browser-side code agnostic to the CLI's output format.
+**No hallucinated excerpts.** The bridge validates each `excerpt` as a verbatim substring (whitespace-normalised) of the provided sources before emitting `tree.ready`. Paraphrased nodes are dropped server-side.
 
-### 3. Trees only live on the canvas (v0.4)
+### 4. TreeGeneratorHost is a singleton
+Tree generation starts in one place and the bridge reply may arrive after the originating component unmounts.
 
-There is no separate tree viewer. Every generated tree is rendered as a `SynthesisTreeNode` inside a canvas room. Two entry points spawn one:
+- The WS listener lives in `<TreeGeneratorHost />`, mounted **once** in `app/layout.tsx`.
+- Pending jobs are kept in a module-scope `Map` (`PENDING` in `useTreeGenerator.ts`), not component state.
+- Two listener channels route results: `SYNTHESIS_LISTENERS` (chat-bubble) and `CANVAS_DROP_LISTENERS` (canvas drop / paste). Each callback receives the full `job`, so subscribers filter by their own `canvasId` / `chatThreadId`.
 
-- **Canvas-drop** — drop an `.md` file on the canvas OR paste markdown with Cmd/Ctrl+V. The canvas handler sends a `tree.generate` with `kind: "synthesis"` over a single synthetic source (e.g. `slug: "paste-xxxx"`), and on `tree.ready` pushes a `CanvasNodeTree` at the drop/paste position.
-- **Chat-bubble synthesis** — a chat bubble in Tree mode with attached doc chips hits the purple 🕸 button and a `SynthesisTreeNode` spawns beside it.
+### 5. Drag-drop everywhere, no multi-click pickers
+- Global drop zone (outside the canvas) imports md into the workspace drawer.
+- Doc drawer → canvas surface via HTML5 drag with `application/x-oxflow-doc` payload (JSON: `{ slug, title }`).
+- Canvas surface also accepts `.md` file drops (imports to workspace AND generates a tree on canvas) and plain-text drops.
+- React Flow nodes are draggable by default; interactive children use `className="nodrag"`.
 
-Every Claude-generated node carries `{ label, summary, excerpt, sourceSlug, children? }`. The bridge **verifies each excerpt appears verbatim** (whitespace-normalised substring) in the provided sources — paraphrased nodes are dropped server-side before the tree is emitted. Same rule applies to both entry points; the bridge doesn't care where sources come from.
-
-**Branch querying.** Each concept in a tree has a Chat button. Clicking it spawns a chat bubble to the right seeded with a `role: "system"` message containing the branch's label/summary/excerpt. The bubble hides the system seed from its visible feed but still sends it to Claude as history so answers stay grounded.
-
-### 4. TreeGeneratorHost is a singleton mount
-
-Tree generation is started from one place (canvas drop/paste or a chat bubble) and the bridge reply arrives later — possibly after that component unmounts. So:
-
-- The **WS listener** lives in `<TreeGeneratorHost />`, mounted **once** in `app/layout.tsx`. It never unmounts during navigation.
-- Pending jobs are kept in a **module-scope `Map`** (`PENDING` in `useTreeGenerator.ts`), not component state. Any hook that creates a job registers it here; the Host resolves it when bridge replies arrive.
-- Two module-scope listener channels route results to the right surface: `SYNTHESIS_LISTENERS` (chat-bubble-originated) and `CANVAS_DROP_LISTENERS` (canvas-drop/paste originated). Each job kind routes to exactly one channel, with the callback carrying the full `job` object so multi-bubble / multi-canvas filtering is straightforward.
-
-### 5. Drag-drop everywhere, no multi-click picker
-
-- **Global drop zone** (whole page) for import.
-- **Doc drawer → canvas surface** via HTML5 drag with `application/x-oxflow-doc` payload. Same payload is accepted by chat bubbles for synthesis attachment.
-- **React Flow nodes** are draggable by default; we disable drag on interactive children via `className="nodrag"`.
-
-### 6. Next.js conventions we follow
-
-- **App Router + Turbopack**. Server components only where they have to be (the Liveblocks auth route). Everything else is client.
-- **Dynamic `params` is awaited** — `use(params)` on client components, `await params` on server components.
-- **CSS tokens lifted from `oxflow-mono/BRANDING.md` into `app/globals.css`**. No Tailwind. Utility classes like `.btn`, `.panel`, `.tnode`, `.cnode--*` are declared once and reused. Match the ink ladder, accent green, grid `.geo-bg`.
+### 6. Next.js conventions
+- App Router + Turbopack. Server components only where they must be (the auth route). Everything else is client.
+- Dynamic `params` is awaited: `use(params)` in client components, `await params` in server components.
+- **No Tailwind.** Styles live in `app/globals.css` via tokens from `oxflow-mono/BRANDING.md`. Reusable utility classes (`.btn`, `.cnode--*`, `.canvas-titlebar`, `.geo-bg`).
 
 ---
 
 ## Wire protocol (bridge ↔ studio)
 
-Defined in `studio/lib/bridge.ts` and mirrored in `studio-bridge/src/index.ts`. Breaking changes must bump the `VERSION` constant in the bridge and update both files.
+Defined in `studio/lib/bridge.ts` and mirrored in `studio-bridge/src/index.ts`. Bump the bridge `VERSION` on breaking changes.
 
-### Client → bridge
+**Client → bridge**
 ```jsonc
-{ "type": "chat.start",   "sessionId", "systemPrompt", "userMessage", "history": [...] }
-{ "type": "chat.cancel",  "sessionId" }
-{ "type": "session.close","sessionId", "title", "contextDocs", "history": [...] }
-{ "type": "tree.generate","sessionId", "kind": "per-doc" | "synthesis",
-                          "focusPrompt": string | null,
-                          "sources": [{ slug, title, body }] }
+{ "type": "chat.start",    "sessionId", "systemPrompt", "userMessage", "history": [...] }
+{ "type": "chat.cancel",   "sessionId" }
+{ "type": "session.close", "sessionId", "title", "contextDocs", "history": [...] }
+{ "type": "tree.generate", "sessionId", "kind": "per-doc" | "synthesis",
+                           "focusPrompt": string | null,
+                           "sources": [{ slug, title, body }] }
 ```
 
-### Bridge → client
+**Bridge → client**
 ```jsonc
-{ "type": "hello",       "bridgeVersion", "sessionsDir", "claudeBin" }
-{ "type": "chat.delta",  "sessionId", "delta" }
-{ "type": "chat.done",   "sessionId" }
+{ "type": "hello",        "bridgeVersion", "sessionsDir", "claudeBin" }
+{ "type": "chat.delta",   "sessionId", "delta" }
+{ "type": "chat.done",    "sessionId" }
 { "type": "session.saved","sessionId", "path" }
-{ "type": "tree.status", "sessionId", "status": "generating" }
-{ "type": "tree.ready",  "sessionId", "tree": { rootLabel, nodes }, "droppedNodes" }
-{ "type": "tree.error",  "sessionId", "message" }
-{ "type": "error",       "sessionId?", "message" }
+{ "type": "tree.status",  "sessionId", "status": "generating" }
+{ "type": "tree.ready",   "sessionId", "tree": { rootLabel, nodes }, "droppedNodes" }
+{ "type": "tree.error",   "sessionId", "message" }
+{ "type": "error",        "sessionId?", "message" }
 ```
 
-Session IDs are **bridge-stateless** — the client generates them, the bridge echoes them back on each reply. Cancels map back to the child process via the bridge's `activeStreams` Map.
-
----
-
-## What's been built (changelog-ish)
-
-### v0.1 — core app
-- Next.js scaffold with CSS tokens, `.geo-bg`, Inter + JetBrains Mono, `.shell` layout
-- Liveblocks workspace + canvas rooms, `Presence`, `StudioUser`
-- Drag-drop md import parsed client-side with `gray-matter` → `DocRecord`
-- `/` hub with drop zone + tiles + canvas/docs lists
-- `/reader/[...slug]` with TOC, wikilinks rewrite, BR auto-link
-- `/tree` with breadcrumb-stacked recursive trees (workspace / doc / chat / rule sources)
-- `/canvas/[id]` with React Flow + Liveblocks, DocCard + Note + Chat nodes, presence cursors
-
-### v0.2 — bridge + chat bubbles
-- `studio-bridge` CLI; WebSocket server, origin check, localhost binding
-- Spawn `claude -p` with `stream-json`, forward `content_block_delta` → `chat.delta`
-- Session summaries written to `~/Desktop/oxflow-studio/sessions/YYYY-MM-DD-Thhmm-*.md`
-
-### v0.5 — Trees as canvas nodes + rename + GitHub (current)
-- **Concept trees expand into individual canvas nodes.** `SynthesisTreeNode` is gone; replaced by `CanvasNodeConcept` + `components/nodes/ConceptNode.tsx`. On canvas-drop/paste (or chat-bubble synthesis), the bridge returns the generated tree, the client flattens it and runs dagre (`studio/lib/conceptLayout.ts`) from the drop position, then pushes all concept nodes + parent→child `CanvasEdge` entries in one Liveblocks mutation. Root concept is visually distinct (accent-colored). Each child concept has a Chat button that spawns a seeded chat bubble.
-- **Edges render from storage.** `canvasStorage.edges: LiveList<CanvasEdge>` was defined but never populated; Canvas.tsx now reads it into `rfEdges`. `removeNode` also prunes edges touching the removed node.
-- **Canvas rename.** `CanvasTitleBar` at the top-left of the surface. Click to edit, Enter/blur to save. Writes `CanvasMeta.title` + `updatedAt` via a workspace mutation.
-- **Double-click → chat bubble** (was note). `N` still adds a note; `C` still adds a chat.
-- **Auto-fitView on tree drop.** After the concept tree is pushed, `fitView({ nodes: [...] })` frames the new subtree so it's visible even if the drop position was off-screen.
-- **Repo on GitHub.** Pushed to `github.com/361-coders-nz/Research-Viewer`. Root `README.md` has setup instructions for new contributors.
-
-### v0.4 — Canvas-first trees
-- **Scrapped `/tree` page** and its popover, TreeExplorer/View/Node, RegenTreeMenu, TreeStatusDot, `lib/tree.ts`, and the `docTrees` workspace storage.
-- **Canvas becomes the only tree surface.** Drop an `.md` file on the canvas OR paste markdown (Cmd/Ctrl+V) to generate a concept tree inline as a `SynthesisTreeNode`. Under the hood this spawns a `canvas-drop` pending job (see `components/useTreeGenerator.ts`) that hits the bridge's synthesis path with a single synthetic source.
-- **GlobalDropZone skips drops that targeted `.canvas-surface`** so the canvas handler wins for md-on-canvas drops; workspace import still fires for drops outside the canvas.
-- **Query a branch from the canvas.** Each concept inside `SynthesisTreeNode` has a Chat button that spawns a `ChatBubbleNode` pre-seeded with a `role: "system"` message containing the branch's label/summary/excerpt. The chat bubble hides system messages from the visible feed but shows a dim "context" banner and still forwards them to Claude in history.
-- **Dead-code removal.** `per-doc` tree gen, `useDocTree`, auto-generation on import, and the "open as tree" buttons on DocCardNode and ChatBubbleNode are gone. `docTrees: LiveMap` is removed from `WorkspaceStorage`.
-- **Import diagnostics.** `useImport.tsx` now surfaces per-file failures via toast and logs `[import]` + `[docs]` summaries so silent import bugs are observable without a deep dive.
-
-### v0.3 — Claude-generated concept trees
-- Shared types: `GeneratedTree`, `GeneratedNodeJson`, `CanvasNodeTree`, `CanvasNodeChat.attachedSlugs`
-- `workspaceStorage.docTrees: LiveMap<slug, LiveObject<GeneratedTree>>`
-- Locked system prompt at `studio-bridge/src/treePrompt.ts`
-- `tree.generate` handler spawns `claude`, parses JSON, **verifies excerpts verbatim**, drops paraphrased nodes
-- `TreeStatusDot` shown on drawer chips + canvas DocCards (4 states: pending/generating/ready/error)
-- `RegenTreeMenu` dropdown: Regenerate / Regenerate with focus… / Remove doc
-- `useTreeGenerator` hook + `TreeGeneratorHost` singleton for WS listener lifetime
-- Flow A: import → auto `tree.generate` → status dot animates → `/tree` doc sub-tree surfaces "Claude breakdown" as primary branch with clickable excerpts (link to reader with `?q=<excerpt>` highlight)
-- Flow B: drag docs onto chat bubble → flip mode to Tree → hit 🕸 → bridge synthesises → `SynthesisTreeNode` appears on canvas
-
-### Deployed
-- `https://oxflow-studio.vercel.app`
-- Env vars in production: `LIVEBLOCKS_SECRET_KEY`, `NEXT_PUBLIC_LIVEBLOCKS_PUBLIC_KEY`, `NEXT_PUBLIC_DEFAULT_WORKSPACE`
-- Vercel project: `oxflow-studio` under account `admin-55954479`
+Session IDs are bridge-stateless: the client generates them, the bridge echoes them on each reply. Cancels route to the child process via the bridge's `activeStreams` Map. Client-side `kind` can be `"canvas-drop"` but only `synthesis` / `per-doc` go on the wire — `canvas-drop` only affects which local listener channel fires.
 
 ---
 
 ## Local development
 
 ```bash
-# ─── Studio ──────────────────────────────────────────────
+# Studio
 cd studio
 npm install
-# First run: cp .env.example .env.local and fill in Liveblocks keys
-npm run dev                     # → http://localhost:3000 (or :3001 if busy)
-npm run typecheck               # tsc --noEmit
+cp .env.example .env.local       # fill Liveblocks keys + NEXT_PUBLIC_DEFAULT_WORKSPACE
+npm run dev                      # http://localhost:3000
+npm run typecheck
 
-# ─── Bridge (needed for chat bubbles + tree generation) ──
+# Bridge (needed for chat + tree generation)
 cd ../studio-bridge
 npm install
-npm start                       # → ws://127.0.0.1:4456
-# top-bar "Bridge" badge turns green in the browser
+npm start                        # ws://127.0.0.1:4456
 ```
 
-Neither starts the other. Both should be running for the full experience.
+Neither starts the other. Both run for the full experience.
 
 ---
 
@@ -239,84 +123,74 @@ cd studio
 vercel --prod --yes
 ```
 
-`vercel.json` currently just declares the Next framework. No build-time content step. Env vars are in place in Vercel for prod; re-run with `vercel env add NAME production` if one goes missing.
+Env vars live on Vercel; `vercel env add NAME production` if one goes missing. **Always deploy from `studio/`, not the repo root** — the repo root isn't a Next.js app, so deploying from there fails with "Couldn't find pages or app directory."
 
 ---
 
 ## Conventions + rules
 
-1. **No Tailwind.** Styles live in `app/globals.css` using the token block. If you reach for a utility class and it doesn't exist, add a sibling component-scoped rule rather than inlining a new system.
-
-2. **Every mutation goes through a Liveblocks mutation hook.** Never mutate storage directly from an event handler. Mutations must be guarded by `<ClientSideSuspense>` upstream.
-
-3. **Drag payloads use MIME type `application/x-oxflow-doc`** with a JSON body `{ slug, title }`. Any component that accepts doc drops should check for this type and call `preventDefault` on `dragover`.
-
-4. **Node types** are registered in `Canvas.tsx`'s `nodeTypes`. Each canvas node variant in `CanvasStorage.nodes` must have a matching React Flow `type: <kind>` string and a component in `components/nodes/`. Each node component accepts the standard React Flow `NodeProps` and must render:
-   - `<NodeDeleteButton id={id} />` at the top for removal
-   - A header (icon + title)
-   - A body
-   - Handles (`<Handle type="source" …/>` and `<Handle type="target" …/>`) even if unused
-
-5. **Tree sources** in `lib/tree.ts` all return a `TreeSnapshot` of `{ id, rootLabel, nodes[], edges[] }`. Rendering happens in `components/TreeView.tsx` via dagre layout. The TreeExplorer drills by pushing crumbs of kind `doc | heading | chat | rule`. **Heading-kind crumbs** never push a new tree — they open the reader (with optional `?q=<excerpt>` highlight). Drillable **doc/rule/chat** crumbs push a new pane in the stack.
-
-6. **Tree status icon component (`TreeStatusDot`) is the single source of truth** for tree generation state visualisation. If you're adding a new surface that should show tree status, use this component.
-
-7. **No hallucinated excerpts ever ship.** The bridge validates `excerpt` verbatim against the provided sources before emitting `tree.ready`. If you tweak the prompt, re-run the validation — the bridge drops nodes whose excerpts don't match.
-
-8. **Respect localhost-only binding on the bridge.** Never widen the `verifyClient` origin check without an explicit ADR.
+1. **No Tailwind.** New styles go into `app/globals.css` alongside the token block.
+2. **Mutations only via Liveblocks hooks**, gated by `<ClientSideSuspense>` upstream.
+3. **Doc drag payload** is MIME `application/x-oxflow-doc` with JSON `{ slug, title }`. Components that accept doc drops check the type and `preventDefault` on `dragover`.
+4. **Canvas node contract.** Each variant in `CanvasNode` union (`doc | note | chat | concept`) must have a component in `components/nodes/`, registered in `Canvas.tsx`'s `nodeTypes`. Every node renders: `<NodeDeleteButton id={id} />`, a header, a body, and both React Flow handles (even if unused).
+5. **No hallucinated excerpts ship.** Don't relax the bridge's verbatim-substring check. If you change `treePrompt.ts`, validate with a real corpus sample.
+6. **Bridge stays localhost-bound.** Don't widen `verifyClient` origins without explicit sign-off.
+7. **Deploy from `studio/` only.** There's a `.vercel` link in that directory; don't create one at the repo root.
 
 ---
 
-## Known limitations / open items
+## Known limitations
 
-- **Course module was removed** in v0.3 after the user deemed it out of scope. Don't add it back without an ask.
-- **GitHub "pull latest research" is out of scope** for v1. Docs enter the workspace only via drag-drop.
-- **Synthesis trees are canvas-local.** They aren't surfaced in the global Tree Explorer. If requested, add a workspace-level `syntheses: LiveMap` and a new tree source.
-- **Course-progress / per-user progress rooms don't exist.** User identity is `localStorage` only (`oxflow-studio:user`).
-- **Bridge has no chunking for giant md.** A 100KB+ doc passed whole may blow the context window. The bridge surfaces Claude's error back to the UI; we don't retry.
-- **No tests yet.** `npm run typecheck` is the primary safety net. Add vitest if behaviours are getting hard to verify manually.
-- **`react-markdown` + `rehype-raw` conflict** was sidestepped by moving quote-highlighting to a post-render DOM walker in `MarkdownReader`. Don't reintroduce `rehype-raw` without revisiting that.
+- **Bridge has no chunking for large md.** A 100KB+ doc passed whole may blow Claude's context. Error surfaces back to the UI via a toast; there's no retry.
+- **Canvas trees are per-canvas.** Not surfaced at a workspace level. If cross-canvas roll-up is wanted later, add a workspace-level `syntheses` map and a dedicated surface.
+- **User identity is `localStorage` only** (`oxflow-studio:user`). No per-user progress store.
+- **No tests.** `npm run typecheck` is the safety net.
+- **Bridge has no client-side timeout.** If the bridge hangs or Claude takes forever, the persistent "Generating…" toast stays up until manually dismissed.
 
 ---
 
-## How to extend (cheat sheet)
+## How to extend
 
-**Add a new canvas node type** (e.g. an embed):
-1. Add a discriminated `CanvasNodeXxx` variant to `lib/liveblocks.ts`'s `CanvasNode` union.
-2. Create `components/nodes/XxxNode.tsx` that accepts `NodeProps`, renders `NodeDeleteButton`, handles, and content.
-3. Register it in `Canvas.tsx`'s `nodeTypes` map.
-4. Add a toolbar button in `Canvas.tsx` that creates the node via a mutation on `storage.get("nodes").push(...)`.
+**Add a new canvas node type:**
+1. Add a `CanvasNodeXxx` variant to `lib/liveblocks.ts`'s `CanvasNode` union.
+2. Create `components/nodes/XxxNode.tsx` (accepts `NodeProps`, renders delete button + handles).
+3. Register in `Canvas.tsx`'s `nodeTypes`.
+4. Add a toolbar button + `useCanvasMutation` to push into `storage.get("nodes")`.
 
-**Add a new tree source** (e.g. entities):
-1. Add a builder in `lib/tree.ts` returning a `TreeSnapshot`.
-2. Extend the `Crumb.kind` union and wire it into the `trees` useMemo in `TreeExplorer.tsx`.
-3. Update `TreeNode.tsx`'s `drill` switch if the new kind needs special payload routing.
-
-**Add a new bridge message**:
+**Add a new bridge message:**
 1. Extend `BridgeInbound` / `BridgeOutbound` in `studio/lib/bridge.ts`.
 2. Mirror the type in `studio-bridge/src/index.ts`.
-3. Add the handler in `wss.on('connection', …)`'s message switch.
-4. Bump `VERSION` in both files.
+3. Handle in the bridge's `wss.on('connection', …)` switch.
+4. Bump the bridge `VERSION`.
 
-**Change the tree-gen prompt**:
-- Edit `studio-bridge/src/treePrompt.ts`. Re-run with a real corpus sample to confirm the excerpt-verbatim rule still holds.
+**Change the tree-gen prompt:** edit `studio-bridge/src/treePrompt.ts`. Re-run against a real doc to confirm excerpts still match verbatim after the change.
 
 ---
 
-## Non-obvious pitfalls we already solved (don't re-break)
+## Non-obvious pitfalls (don't re-break)
 
-- **"RoomProvider is missing from the React tree"** — hit if you render a Liveblocks hook outside a provider. Fix is already applied: `RoomProviders` always mounts the provider with a server-stable `SSR_FALLBACK_USER`; real identity hydrates in `useEffect`.
-- **"This mutation cannot be used until storage has been loaded"** — caused by keyboard shortcuts firing mutations before Liveblocks synced. Fix: the whole app sits under `<ClientSideSuspense>` in layout + canvas pages, and keyboard handlers check `nodesStorage != null` before calling add* mutations.
-- **`fitView` + empty flex layout** — React Flow's fitView can fail on first render if parent has no height. `.tree-page { height: calc(100vh - 56px) }` was added to avoid.
-- **Quote highlighting breaks markdown tables** — injecting `<mark>` into the md source disrupted pipes. Fix: post-render DOM walker in `MarkdownReader.tsx` wraps text nodes client-side. Don't revert to source-injection.
-- **`Vercel build blocks vulnerable Next`** — we're pinned to `next@^16.2.4`. Don't downgrade below the patched version.
-- **Multiple `useTreeGenerator` instances** would split the pending-jobs state if it was in `useRef`. It's in module scope (`PENDING` Map) on purpose. Don't move it back into a hook.
+- **"RoomProvider is missing from the React tree"** — Liveblocks hook rendered outside the provider. `RoomProviders` always mounts with a server-stable `SSR_FALLBACK_USER`; real identity hydrates in `useEffect`.
+- **"This mutation cannot be used until storage has been loaded"** — keyboard shortcuts firing before Liveblocks synced. The whole app sits under `<ClientSideSuspense>`; keyboard handlers also gate on `nodesStorage != null`.
+- **fitView on empty ReactFlow** fails silently. After pushing a concept tree, wrap `fitView({ nodes })` in a short `setTimeout` + try/catch so it retries once nodes are mounted.
+- **Quote highlighting breaks markdown tables** if injected into the md source. The fix is a post-render DOM walker in `MarkdownReader.tsx` that wraps text nodes client-side. Don't reintroduce `rehype-raw`.
+- **Multiple `useTreeGenerator` instances** would split the pending-jobs state if it lived in `useRef`. It's in module scope (`PENDING` Map) on purpose.
+- **Toast default duration is 3.2s.** Long-running flows (tree generation) must use `durationMs: 0` for persistent toasts and dismiss explicitly on outcome via `dismissToast(id)`.
+- **GlobalDropZone vs CanvasSurface drop conflict.** The window-level GlobalDropZone listener skips drops whose target is inside `.canvas-surface` so the canvas handler wins for md-on-canvas drops.
+- **Vercel deploy from repo root fails.** The Next.js app is in `studio/`; deploying from the parent finds no `app/` or `pages/`. Deploy from `studio/` only.
+
+---
+
+## What's been built (compressed history)
+
+- **v0.1–v0.3** — Next.js scaffold, Liveblocks workspace + canvas rooms, markdown import via drag-drop, reader with TOC/wikilinks/BR auto-links, React Flow canvas with DocCard/Note/Chat nodes, presence cursors. Studio-bridge CLI spawning `claude -p` with stream-json. Claude-generated concept trees with verbatim-excerpt validation. (Course module was planned then removed; don't reintroduce.)
+- **v0.4** — Scrapped the `/tree` page entirely. Trees moved to the canvas as a single compact `SynthesisTreeNode`. Added canvas-drop + paste-to-tree flow; branch-chat spawns a seeded chat bubble per concept.
+- **v0.5 (current)** — Concept trees now expand into individual React Flow nodes (`CanvasNodeConcept`) with edges (`CanvasEdge`) laid out via dagre. Root concept visually distinct. Click-to-rename canvas titles. Double-click canvas → new chat bubble. Auto-`fitView` frames new subtrees. Persistent "Generating…" toast tied to session id, auto-cleared on ready/error. Canvas `.md` drop now also imports to the workspace drawer. Repo pushed to `github.com/361-coders-nz/Research-Viewer`.
 
 ---
 
 ## Who this is for
 
-The user is building a team tool for 361° / Oxcon on the oxFlow research corpus. They iterate in short cycles, deploy continuously, and prefer direct, specific feedback. They're comfortable with partial features ship-now → polish-later, but they call out accuracy and UX smoothness when they matter. Two non-negotiables so far:
+Team tool for 361° / Oxcon on the oxFlow research corpus. The maintainer iterates in short cycles, deploys continuously, and prefers direct feedback. Two non-negotiables:
 
-- **60fps perceived perf** on canvas/tree interactions (memoised React Flow nodes, rAF-batched commits, `transform: translate3d` for drags).
-- **No hallucinated content**. Every Claude-generated tree node must trace back to a verbatim source passage.
+- **60fps perceived perf** on canvas/tree interactions (memoised React Flow nodes, batched position commits, `transform: translate3d` for drags).
+- **No hallucinated content.** Every Claude-generated concept must trace back to a verbatim source passage.
