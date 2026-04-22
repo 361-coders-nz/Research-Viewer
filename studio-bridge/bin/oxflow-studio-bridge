@@ -1,0 +1,12 @@
+#!/usr/bin/env node
+import("../dist/index.js").catch(async () => {
+  const { spawnSync } = await import("node:child_process");
+  const path = await import("node:path");
+  const url = await import("node:url");
+  const here = path.dirname(url.fileURLToPath(import.meta.url));
+  const tsx = path.join(here, "..", "node_modules", ".bin", "tsx");
+  const res = spawnSync(tsx, [path.join(here, "..", "src", "index.ts"), ...process.argv.slice(2)], {
+    stdio: "inherit",
+  });
+  process.exit(res.status ?? 1);
+});

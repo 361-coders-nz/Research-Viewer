@@ -1,0 +1,22 @@
+{
+  "name": "oxflow-studio-bridge",
+  "version": "0.2.0",
+  "private": true,
+  "description": "Localhost WebSocket bridge that spawns the user's local Claude Code CLI for oxFlow Studio chat bubbles, writes session summaries to disk.",
+  "bin": {
+    "oxflow-studio-bridge": "./bin/oxflow-studio-bridge"
+  },
+  "scripts": {
+    "start": "tsx src/index.ts",
+    "dev": "tsx watch src/index.ts"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.6",
+    "@types/ws": "^8.5.13",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.3"
+  }
+}

@@ -1,0 +1,32 @@
+node_modules/
+.next/
+out/
+.vercel
+dist/
+build/
+
+# env
+.env
+.env.local
+.env*.local
+
+# logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# macOS / editor cruft
+.DS_Store
+.idea
+.vscode/*
+!.vscode/settings.json
+*.swp
+*.swo
+
+# tsc artifacts
+*.tsbuildinfo
+next-env.d.ts.backup
+
+# local session summaries written by studio-bridge
+sessions/
