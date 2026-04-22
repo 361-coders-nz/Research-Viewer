@@ -177,7 +177,15 @@ Session IDs are **bridge-stateless** — the client generates them, the bridge e
 - Spawn `claude -p` with `stream-json`, forward `content_block_delta` → `chat.delta`
 - Session summaries written to `~/Desktop/oxflow-studio/sessions/YYYY-MM-DD-Thhmm-*.md`
 
-### v0.4 — Canvas-first trees (current)
+### v0.5 — Trees as canvas nodes + rename + GitHub (current)
+- **Concept trees expand into individual canvas nodes.** `SynthesisTreeNode` is gone; replaced by `CanvasNodeConcept` + `components/nodes/ConceptNode.tsx`. On canvas-drop/paste (or chat-bubble synthesis), the bridge returns the generated tree, the client flattens it and runs dagre (`studio/lib/conceptLayout.ts`) from the drop position, then pushes all concept nodes + parent→child `CanvasEdge` entries in one Liveblocks mutation. Root concept is visually distinct (accent-colored). Each child concept has a Chat button that spawns a seeded chat bubble.
+- **Edges render from storage.** `canvasStorage.edges: LiveList<CanvasEdge>` was defined but never populated; Canvas.tsx now reads it into `rfEdges`. `removeNode` also prunes edges touching the removed node.
+- **Canvas rename.** `CanvasTitleBar` at the top-left of the surface. Click to edit, Enter/blur to save. Writes `CanvasMeta.title` + `updatedAt` via a workspace mutation.
+- **Double-click → chat bubble** (was note). `N` still adds a note; `C` still adds a chat.
+- **Auto-fitView on tree drop.** After the concept tree is pushed, `fitView({ nodes: [...] })` frames the new subtree so it's visible even if the drop position was off-screen.
+- **Repo on GitHub.** Pushed to `github.com/361-coders-nz/Research-Viewer`. Root `README.md` has setup instructions for new contributors.
+
+### v0.4 — Canvas-first trees
 - **Scrapped `/tree` page** and its popover, TreeExplorer/View/Node, RegenTreeMenu, TreeStatusDot, `lib/tree.ts`, and the `docTrees` workspace storage.
 - **Canvas becomes the only tree surface.** Drop an `.md` file on the canvas OR paste markdown (Cmd/Ctrl+V) to generate a concept tree inline as a `SynthesisTreeNode`. Under the hood this spawns a `canvas-drop` pending job (see `components/useTreeGenerator.ts`) that hits the bridge's synthesis path with a single synthetic source.
 - **GlobalDropZone skips drops that targeted `.canvas-surface`** so the canvas handler wins for md-on-canvas drops; workspace import still fires for drops outside the canvas.
